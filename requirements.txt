@@ -1,3 +1,6 @@
 flask
-pyTelegramBotAPI
-gunicorn
+python-telegram-bot
+aiohttp
+pandas
+numpy
+matplotlib
