@@ -31,7 +31,7 @@ ATR_SL_MULTIPLIER = 0.6
 MAX_TP_PERCENT = 0.15
 
 POSITION_SIZE = 0.01
-TRADE_HORIZON = "~5+ hour"
+TRADE_HORIZON = "The time depends on the trade I gave you "
 SIGNAL_THRESHOLD = 3.5
 MIN_HEALTH_SCORE = 50.0
 
