@@ -18,18 +18,22 @@ from telegram.ext import (
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8396342382:AAGT2qvzVqQumjmm4B5Jaejppc4eK0FsweQ")
 
-
 BINANCE_BASE_URL = "https://api.binance.com"
 GOLD_API_URL = "https://api.gold-api.com/price/XAU"
 FEAR_GREED_URL = "https://api.alternative.me/fng/?limit=1"
 
 KLINE_INTERVAL = "5m"
+CONFIRMATION_INTERVAL = "15m"
 KLINE_LIMIT = 200
-RISK_REWARD_RATIO = 1.5
-ATR_SL_MULTIPLIER = 1.2
-MAX_TP_PERCENT = 0.5
+
+RISK_REWARD_RATIO = 1.2
+ATR_SL_MULTIPLIER = 0.6
+MAX_TP_PERCENT = 0.15
+
 POSITION_SIZE = 0.01
-TRADE_HORIZON = "~1-4 hour"
+TRADE_HORIZON = "~5+ hour"
+SIGNAL_THRESHOLD = 3.5
+MIN_HEALTH_SCORE = 50.0
 
 session: aiohttp.ClientSession | None = None
 
@@ -430,13 +434,32 @@ def build_health_score(
     }
 
 
+def determine_trend_side(df: pd.DataFrame) -> str:
+    last = df.iloc[-1]
+
+    bullish = (
+        last["close"] > last["ema9"] > last["ema21"]
+        and last["macd"] >= last["macd_signal"]
+    )
+    bearish = (
+        last["close"] < last["ema9"] < last["ema21"]
+        and last["macd"] <= last["macd_signal"]
+    )
+
+    if bullish:
+        return "BUY"
+    if bearish:
+        return "SELL"
+    return "NEUTRAL"
+
+
 def score_signal(
     df: pd.DataFrame,
+    confirmation_df: pd.DataFrame,
     book_pressure: dict[str, float],
     ticker_stats: dict[str, Any],
     fear_greed: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    last = df.iloc[-1]
     support, resistance = support_resistance(df)
 
     recent_12 = df["close"].tail(12)
@@ -468,11 +491,23 @@ def score_signal(
         + market_sentiment["reasons"][:2]
     )[:6]
 
-    if final_score >= 2.5:
+    if final_score >= SIGNAL_THRESHOLD:
         side = "BUY"
-    elif final_score <= -2.5:
+    elif final_score <= -SIGNAL_THRESHOLD:
         side = "SELL"
     else:
+        side = "NEUTRAL"
+
+    confirmation_side = determine_trend_side(confirmation_df)
+    if side != "NEUTRAL":
+        if confirmation_side != side:
+            reasons.append(f"15m confirmation failed ({confirmation_side})")
+            side = "NEUTRAL"
+        else:
+            reasons.append(f"15m confirmation passed ({confirmation_side})")
+
+    if health["score"] < MIN_HEALTH_SCORE:
+        reasons.append(f"Market health too weak ({health['score']}/100)")
         side = "NEUTRAL"
 
     confidence = min(95, max(5, int(50 + abs(final_score) * 8)))
@@ -488,6 +523,10 @@ def score_signal(
         "indicator_groups": indicator_groups,
         "market_sentiment": market_sentiment,
         "health": health,
+        "confirmation": {
+            "interval": CONFIRMATION_INTERVAL,
+            "side": confirmation_side,
+        },
     }
 
 
@@ -548,6 +587,7 @@ def build_market_message(
     indicator_groups = signal["indicator_groups"]
     market_sentiment = signal["market_sentiment"]
     health = signal["health"]
+    confirmation = signal["confirmation"]
 
     fg_text = (
         f"{fear_greed['value']} ({fear_greed['classification']})"
@@ -574,6 +614,7 @@ def build_market_message(
         f"🔴 Resistance: {signal['resistance']}\n"
         f"⚖️ Order Book Buy Pressure: {book_pressure['buy_pressure']:.2%}\n"
         f"🚀 1h Momentum: {signal['one_hour_change_pct']:.2f}%\n"
+        f"⏳ 15m Confirmation: {confirmation['side']}\n"
         f"😶‍🌫️ Fear & Greed: {fg_text}\n"
         f"🌍 Market Sentiment: {market_sentiment['label']} ({market_sentiment['score']})\n"
         f"❤️ Health Score: {health['score']}/100 [{health['status']}]\n\n"
@@ -604,12 +645,17 @@ def build_market_message(
 async def analyze_symbol(
     symbol: str,
 ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any], dict[str, float], dict[str, Any] | None]:
-    df = await fetch_binance_klines(symbol)
+    df = await fetch_binance_klines(symbol, interval=KLINE_INTERVAL)
     df = add_indicators(df)
+
+    confirmation_df = await fetch_binance_klines(symbol, interval=CONFIRMATION_INTERVAL)
+    confirmation_df = add_indicators(confirmation_df)
+
     ticker_stats = await fetch_ticker_stats(symbol)
     book_pressure = await fetch_order_book_pressure(symbol)
     fear_greed = await fetch_fear_and_greed()
-    signal = score_signal(df, book_pressure, ticker_stats, fear_greed)
+    signal = score_signal(df, confirmation_df, book_pressure, ticker_stats, fear_greed)
+
     return df, signal, ticker_stats, book_pressure, fear_greed
 
 
